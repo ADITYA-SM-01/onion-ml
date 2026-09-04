@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: onionguard-ml
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: USE_MOCK_DATA
+        value: "false"
+      - key: AGMARKNET_COMMODITY
+        value: "Onion"
