@@ -54,6 +54,8 @@ app.add_middleware(
 # SCHEMAS
 # ══════════════════════════════════════════════════════════════════════════════
 
+from pydantic import BaseModel, Field, field_validator, AliasChoices
+
 class ShelfLifeRequest(BaseModel):
     temperature: List[float] = Field(..., min_length=1, max_length=168)
     humidity: List[float] = Field(..., min_length=1, max_length=168)
@@ -61,9 +63,9 @@ class ShelfLifeRequest(BaseModel):
     ammonia: List[float] = Field(..., min_length=1, max_length=168)
     light: List[float] = Field(..., min_length=1, max_length=168)
     vibration: List[float] = Field(..., min_length=1, max_length=168)
-    time_since_loading_days: float = Field(..., ge=0, le=365)
-    initial_load: float = Field(default=250.0, ge=1)
-    current_load: float = Field(default=240.0, ge=0)
+    time_since_loading_days: float = Field(default=0.0, ge=0, le=365, validation_alias=AliasChoices('time_since_loading_days', 'timeSinceLoadingDays'))
+    initial_load: float = Field(default=250.0, ge=1, validation_alias=AliasChoices('initial_load', 'initialLoad'))
+    current_load: float = Field(default=240.0, ge=0, validation_alias=AliasChoices('current_load', 'currentLoad'))
 
     @field_validator("temperature", "humidity", "co2", "ammonia", "light", "vibration", mode="before")
     @classmethod
