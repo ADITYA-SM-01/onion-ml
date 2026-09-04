@@ -1,21 +1,13 @@
-fastapi==0.111.0
-uvicorn[standard]==0.30.1
-pydantic==2.7.4
-python-dotenv==1.0.1
-httpx==0.27.0
-requests==2.32.3
+fastapi>=0.110.0
+uvicorn>=0.30.0
+pydantic>=2.7.0
+python-dotenv>=1.0.0
+httpx>=0.27.0
+requests>=2.31.0
 
-# Data science — use pre-built Windows wheels
-numpy==1.26.4
-pandas==2.2.2
-scikit-learn==1.5.0
-xgboost==2.0.3
-# lightgbm — optional: install separately after Visual C++ Build Tools
-# lightgbm==4.3.0
-joblib==1.4.2
-
-# Forecasting — Prophet requires pystan which needs C++ compiler on Windows
-# Install manually if needed:
-#   pip install prophet
-# statsmodels is a lighter alternative (no compiler needed)
-statsmodels==0.14.2
+# Data Science Core
+numpy>=1.24.0,<2.0.0
+pandas>=2.0.0
+scikit-learn>=1.4.0
+scipy>=1.11.0
+joblib>=1.3.0
