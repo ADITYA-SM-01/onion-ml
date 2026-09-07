@@ -1,0 +1,57 @@
+{
+  "dataset": {
+    "n_rows": 25856,
+    "n_batches": 200
+  },
+  "split": {
+    "train_rows": 20698,
+    "test_rows": 5158,
+    "train_batches": 160,
+    "test_batches": 40
+  },
+  "classification": {
+    "RandomForest": {
+      "cv_f1_macro_mean": 0.9511914643754121,
+      "cv_f1_macro_std": 0.005199658305457099,
+      "test_accuracy": 0.9532764637456378,
+      "test_f1_macro": 0.9515976221901911
+    },
+    "XGBoost": {
+      "cv_f1_macro_mean": 0.9643273501079004,
+      "cv_f1_macro_std": 0.005261300850761587,
+      "test_accuracy": 0.9678169833268708,
+      "test_f1_macro": 0.9664775271742513
+    },
+    "LightGBM": {
+      "cv_f1_macro_mean": 0.9636518190147937,
+      "cv_f1_macro_std": 0.0044945170290945444,
+      "test_accuracy": 0.9678169833268708,
+      "test_f1_macro": 0.9664229376033905
+    }
+  },
+  "regression": {
+    "RandomForest": {
+      "cv_mae_mean": 3.65507082624738,
+      "cv_mae_std": 0.38344557571108323,
+      "test_mae": 3.598316272947212,
+      "test_rmse": 5.4100504762455435,
+      "test_r2": 0.946907007135133
+    },
+    "XGBoost": {
+      "cv_mae_mean": 3.2729953082067937,
+      "cv_mae_std": 0.32949145704831806,
+      "test_mae": 3.313124554652344,
+      "test_rmse": 4.7738849471351585,
+      "test_r2": 0.9586592387718572
+    },
+    "LightGBM": {
+      "cv_mae_mean": 3.3496373341040044,
+      "cv_mae_std": 0.2808734668734661,
+      "test_mae": 3.3740967484627773,
+      "test_rmse": 4.914365181609163,
+      "test_r2": 0.9561903862990742
+    }
+  },
+  "best_classifier": "XGBoost",
+  "best_regressor": "XGBoost"
+}

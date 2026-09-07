@@ -5,7 +5,15 @@ Wraps the trained LightGBM / XGBoost models from BASIC-ML/onion_ml/models/
 to provide shelf-life regression and risk classification via REST.
 
 If models are not yet trained, falls back to a physiologically-grounded
-heuristic (same relationships as the training simulator).
+heuristic calibrated to the real sensor hardware.
+
+REAL HARDWARE SENSORS:
+  - DHT22 x2  : temperature (°C), relative humidity (%RH)
+  - MQ-135    : NH3 (ammonia) ppm — protein decomposition spoilage gas
+  - MQ-4      : CH4 (methane) ppm  — anaerobic fermentation gas
+  - ESP32-CAM : irradiance (W/m²)  — computed from camera frame brightness
+
+NO CO2 sensor. NO ethylene sensor.
 """
 
 import os
@@ -18,20 +26,21 @@ import joblib
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 HERE = Path(__file__).parent
-# Look for models in this directory first, then fall back to BASIC-ML
 MODEL_DIRS = [
     HERE / "models",
     HERE.parent / "BASIC-ML" / "onion_ml" / "models",
 ]
 
 RISK_ORDER = ["Low", "Medium", "High"]
+
+# Feature columns — must match BASIC-ML/onion_ml/features.py exactly
 FEATURE_COLUMNS = [
     "temp_mean", "temp_var",
     "rh_mean", "rh_var",
     "vpd_kpa",
-    "co2_mean", "co2_roc",
-    "ethylene_mean", "ethylene_roc",
-    "o2_depletion_rate",
+    "nh3_mean", "nh3_roc",
+    "ch4_mean", "ch4_roc",
+    "irradiance_mean",
     "cum_weight_loss_pct",
     "door_open_freq", "door_open_duration_hrs",
     "light_exposure_hrs",
@@ -80,47 +89,51 @@ def _vapor_pressure_deficit(temp_c: float, rh_pct: float) -> float:
 def _compute_features(
     temperature: list[float],
     humidity: list[float],
-    co2: list[float],
-    ammonia: list[float],
+    nh3: list[float],
+    ch4: list[float],
     light: list[float],
     vibration: list[float],
     time_since_loading_days: float,
     initial_load: float = 250.0,
     current_load: float = 240.0,
-    prev_co2_mean: Optional[float] = None,
+    prev_nh3_mean: Optional[float] = None,
+    prev_ch4_mean: Optional[float] = None,
 ) -> dict:
-    temp_arr = np.array(temperature, dtype=float)
-    rh_arr = np.array(humidity, dtype=float)
-    co2_arr = np.array(co2, dtype=float)
+    temp_arr  = np.array(temperature, dtype=float)
+    rh_arr    = np.array(humidity, dtype=float)
+    nh3_arr   = np.array(nh3, dtype=float)
+    ch4_arr   = np.array(ch4, dtype=float)
+    light_arr = np.array(light, dtype=float)
 
     temp_mean = float(np.mean(temp_arr))
-    temp_var = float(np.var(temp_arr))
-    rh_mean = float(np.mean(rh_arr))
-    rh_var = float(np.var(rh_arr))
-    vpd = _vapor_pressure_deficit(temp_mean, rh_mean)
-    co2_mean = float(np.mean(co2_arr))
-    co2_roc = 0.0 if prev_co2_mean is None else (co2_mean - prev_co2_mean)
+    temp_var  = float(np.var(temp_arr))
+    rh_mean   = float(np.mean(rh_arr))
+    rh_var    = float(np.var(rh_arr))
+    vpd       = _vapor_pressure_deficit(temp_mean, rh_mean)
 
-    # Ammonia as proxy for ethylene (both indicate organic decomposition)
-    eth_mean = float(np.mean(ammonia))
-    eth_roc = 0.0
+    nh3_mean  = float(np.mean(nh3_arr))
+    ch4_mean  = float(np.mean(ch4_arr))
+    irradiance_mean = float(np.mean(light_arr))
 
-    # O2 depletion rate estimated from CO2 increase (respiration stoichiometry)
-    o2_dep_rate = max(0.0, co2_roc * 0.93)
+    # Rate-of-change vs previous window
+    nh3_roc = 0.0 if prev_nh3_mean is None else (nh3_mean - prev_nh3_mean)
+    ch4_roc = 0.0 if prev_ch4_mean is None else (ch4_mean - prev_ch4_mean)
 
-    cum_weight_loss_pct = 100.0 * (initial_load - current_load) / initial_load if initial_load > 0 else 0.0
+    cum_weight_loss_pct = (
+        100.0 * (initial_load - current_load) / initial_load
+        if initial_load > 0 else 0.0
+    )
 
-    # Light as lux array — count hours with lux > 20
-    light_arr = np.array(light, dtype=float)
-    light_exposure_hrs = int(np.sum(light_arr > 20))
+    # Light exposure hours (irradiance > 20 W/m² counts as light stress)
+    light_exposure_hrs = int(np.sum(light_arr > 20.0))
 
     return {
         "temp_mean": temp_mean, "temp_var": temp_var,
         "rh_mean": rh_mean, "rh_var": rh_var,
         "vpd_kpa": vpd,
-        "co2_mean": co2_mean, "co2_roc": co2_roc,
-        "ethylene_mean": eth_mean, "ethylene_roc": eth_roc,
-        "o2_depletion_rate": o2_dep_rate,
+        "nh3_mean": nh3_mean, "nh3_roc": nh3_roc,
+        "ch4_mean": ch4_mean, "ch4_roc": ch4_roc,
+        "irradiance_mean": irradiance_mean,
         "cum_weight_loss_pct": cum_weight_loss_pct,
         "door_open_freq": 0, "door_open_duration_hrs": 0,
         "light_exposure_hrs": light_exposure_hrs,
@@ -131,39 +144,48 @@ def _compute_features(
 # ── Heuristic fallback ────────────────────────────────────────────────────────
 
 def _heuristic_shelf_life(features: dict) -> dict:
-    temp = features["temp_mean"]
-    rh = features["rh_mean"]
-    ammonia = features["ethylene_mean"]
-    days = features["time_since_loading_days"]
-    light = features["light_exposure_hrs"]
+    temp         = features["temp_mean"]
+    rh           = features["rh_mean"]
+    nh3          = features["nh3_mean"]      # ppm from MQ-135
+    ch4          = features["ch4_mean"]      # ppm from MQ-4
+    days         = features["time_since_loading_days"]
+    irr          = features["irradiance_mean"]  # W/m² from camera
 
     max_days = 180.0  # Baseline 6 months for well-stored onions
 
-    # Temperature penalties (optimal: 10-18°C)
-    if temp > 25:
-        max_days -= (temp - 25) * 5
+    # Temperature penalties (optimal: 10–18°C; Indian shed: often 28–35°C)
+    if temp > 30:
+        max_days -= (temp - 30) * 6
     elif temp > 18:
         max_days -= (temp - 18) * 2
     elif temp < 5:
         max_days -= (5 - temp) * 8
 
-    # Humidity penalties (optimal: 60-80%)
+    # Humidity penalties (optimal: 60–75% RH)
     if rh > 80:
         max_days -= (rh - 80) * 3
-    elif rh < 60:
-        max_days -= (60 - rh) * 2
+    elif rh < 55:
+        max_days -= (55 - rh) * 2
 
-    # Gas penalties
-    if ammonia > 5:
-        max_days -= (ammonia - 5) * 10
+    # NH3 penalty (MQ-135): fresh onions ≈ 5–20 ppm; >100 ppm = spoilage signal
+    if nh3 > 100:
+        max_days -= (nh3 - 100) * 0.2
+    elif nh3 > 30:
+        max_days -= (nh3 - 30) * 0.05
 
-    # Light exposure penalty
-    if light > 2:
-        max_days -= light * 1.5
+    # CH4 penalty (MQ-4): baseline 300–800 ppm; >2000 ppm = fermentation
+    if ch4 > 2000:
+        max_days -= (ch4 - 2000) * 0.005
+    elif ch4 > 1000:
+        max_days -= (ch4 - 1000) * 0.002
 
-    remaining = max(0.0, round(max_days - days))
-    spoilage = 0.8 if remaining < 30 else (0.4 if remaining < 90 else 0.1)
-    risk = "High" if remaining < 30 else ("Medium" if remaining < 90 else "Low")
+    # Irradiance penalty (light stress causes sprouting)
+    if irr > 50:
+        max_days -= (irr - 50) * 0.05
+
+    remaining  = max(0.0, round(max_days - days))
+    spoilage   = 0.8 if remaining < 30 else (0.4 if remaining < 90 else 0.1)
+    risk       = "High" if remaining < 30 else ("Medium" if remaining < 90 else "Low")
 
     return {
         "shelf_life_days": remaining,
@@ -178,8 +200,8 @@ def _heuristic_shelf_life(features: dict) -> dict:
 def predict(
     temperature: list[float],
     humidity: list[float],
-    co2: list[float],
-    ammonia: list[float],
+    nh3: list[float],
+    ch4: list[float],
     light: list[float],
     vibration: list[float],
     time_since_loading_days: float,
@@ -189,7 +211,7 @@ def predict(
     _load_models()
 
     features = _compute_features(
-        temperature, humidity, co2, ammonia, light, vibration,
+        temperature, humidity, nh3, ch4, light, vibration,
         time_since_loading_days, initial_load, current_load,
     )
 
@@ -199,17 +221,17 @@ def predict(
     try:
         import pandas as pd
         x = pd.DataFrame([[features[c] for c in FEATURE_COLUMNS]], columns=FEATURE_COLUMNS)
-        proba = _clf.predict_proba(x)[0]
-        high_idx = RISK_ORDER.index("High")
-        spoilage_prob = float(proba[high_idx])
-        risk_class = RISK_ORDER[int(np.argmax(proba))]
-        shelf_life = float(max(0, _reg.predict(x)[0]))
+        proba          = _clf.predict_proba(x)[0]
+        high_idx       = RISK_ORDER.index("High")
+        spoilage_prob  = float(proba[high_idx])
+        risk_class     = RISK_ORDER[int(np.argmax(proba))]
+        shelf_life     = float(max(0, _reg.predict(x)[0]))
         return {
-            "shelf_life_days": round(shelf_life, 1),
+            "shelf_life_days":      round(shelf_life, 1),
             "spoilage_probability": round(spoilage_prob, 3),
-            "risk_class": risk_class,
-            "source": "ml-model",
-            "features": features,
+            "risk_class":           risk_class,
+            "source":               "ml-model",
+            "features":             features,
         }
     except Exception as e:
         print(f"[ShelfLife] ML inference error: {e}. Falling back to heuristic.")
