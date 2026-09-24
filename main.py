@@ -68,34 +68,50 @@ class ShelfLifeRequest(BaseModel):
     Sensor window for shelf-life prediction.
     Send the last N readings (typically 6–24 hours worth).
 
-    Fields map directly to ESP32 sensor hardware:
-      temperature  — DHT22 average (°C)
-      humidity     — DHT22 average (%RH)
-      nh3          — MQ-135 ammonia ppm  [was: co2/ammonia — removed]
-      ch4          — MQ-4 methane ppm    [was: co — renamed for clarity]
-      light        — ESP32-CAM irradiance W/m² (camera-derived)
-      vibration    — SW-420 (0.0 or 1.0)
+    Fields map directly to real ESP32 sensor hardware:
+      temperature  — DHT22 average (°C)  — uses DHT22 #2 when #1 fails (NaN)
+      humidity     — DHT22 average (%RH) — uses DHT22 #2 when #1 fails (NaN)
+      nh3          — MQ-135 ammonia ppm  (aliases: 'ammonia')
+                     Real baseline: ~10 ppm fresh; rises with protein decomp.
+      ch4          — MQ-4 methane ppm    (aliases: 'co')
+                     Real baseline: ~326 ppm clean air; rises with fermentation.
+      light        — ESP32-CAM irradiance W/m² (camera-derived, OPTIONAL)
+                     Defaults to [0.0] when no camera frame is available.
+      vibration    — SW-420 motion sensor (0.0 = no motion, 1.0 = motion)
+
+    NO CO2 sensor. NO ethylene sensor. NO MQ-6 sensor.
     """
     temperature: List[float] = Field(..., min_length=1, max_length=168)
     humidity:    List[float] = Field(..., min_length=1, max_length=168)
 
     # MQ-135 → NH3 (ammonia) ppm — primary spoilage gas indicator
+    # Real hardware baseline: ~400 PPM in clean air (CO2-equivalent sensor floor).
+    # Firmware: MQ135_MIN_PPM=400, MQ135_MAX_PPM=3000.
+    # Readings 400–800 PPM = normal; >1,000 PPM = elevated; >1,500 PPM = active spoilage.
     nh3: List[float] = Field(
         ..., min_length=1, max_length=168,
         validation_alias=AliasChoices('nh3', 'ammonia'),
-        description="NH3 ammonia ppm from MQ-135 sensor"
+        description="NH3/air-quality ppm from MQ-135 sensor (clean-air baseline ~400 ppm)"
     )
 
     # MQ-4 → CH4 (methane) ppm — fermentation indicator
+    # Atmospheric CH4 ≈ 2 PPM, but MQ-4 range is 200–10,000 PPM — cannot read atmospheric.
+    # Sensor floor in clean air ≈ 326 PPM (hardware confirmed).
+    # Firmware: MQ4_MIN_PPM=300, MQ4_MAX_PPM=10000.
+    # Readings 300–1,000 PPM = sensor baseline; >2,000 PPM = fermentation onset.
     ch4: List[float] = Field(
         ..., min_length=1, max_length=168,
         validation_alias=AliasChoices('ch4', 'co'),
-        description="CH4 methane ppm from MQ-4 sensor"
+        description="CH4 methane ppm from MQ-4 sensor (sensor floor ~326 ppm in clean air)"
     )
 
-    # Irradiance W/m² from ESP32-CAM image
-    light: List[float] = Field(..., min_length=1, max_length=168,
-                                description="Irradiance W/m² from camera")
+    # Irradiance W/m² from ESP32-CAM image — OPTIONAL
+    # Defaults to [0.0] when the camera has not yet sent a frame.
+    # The camera pushes frames independently via POST /api/camera/push.
+    light: List[float] = Field(
+        default=[0.0], min_length=1, max_length=168,
+        description="Irradiance W/m² from camera (0.0 if no frame yet)"
+    )
 
     vibration: List[float] = Field(..., min_length=1, max_length=168)
 
@@ -162,7 +178,9 @@ async def health_check():
         "agmarknet_configured": bool(os.getenv("AGMARKNET_API_KEY")),
         "prophet_available": pf.HAS_PROPHET,
         "sklearn_available": pf.HAS_SKLEARN,
-        "sensor_schema": "v2 (nh3+ch4+irradiance — no co2/ethylene)",
+        # Schema v3: light is now optional (camera pushes separately from sensor node)
+        # Real hardware baseline: NH3≈10ppm (MQ-135), CH4≈326ppm (MQ-4)
+        "sensor_schema": "v3 (nh3+ch4; light optional; no co2/ethylene/mq6)",
     }
 
 

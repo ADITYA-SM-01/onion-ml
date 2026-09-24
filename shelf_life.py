@@ -1,19 +1,30 @@
 """
 shelf_life.py
 ─────────────
+
 Wraps the trained LightGBM / XGBoost models from BASIC-ML/onion_ml/models/
 to provide shelf-life regression and risk classification via REST.
 
 If models are not yet trained, falls back to a physiologically-grounded
 heuristic calibrated to the real sensor hardware.
 
-REAL HARDWARE SENSORS:
+REAL HARDWARE SENSORS (calibrated to live serial readings and datasheets):
   - DHT22 x2  : temperature (°C), relative humidity (%RH)
-  - MQ-135    : NH3 (ammonia) ppm — protein decomposition spoilage gas
-  - MQ-4      : CH4 (methane) ppm  — anaerobic fermentation gas
-  - ESP32-CAM : irradiance (W/m²)  — computed from camera frame brightness
+                DHT22 #1 may return NaN — backend falls back to DHT22 #2.
+  - MQ-135    : Air-quality / NH3 sensor
+                  Clean air baseline : ~400 PPM (CO2-equivalent floor)
+                  Good ventilation   : 400–1,000 PPM
+                  Spoilage gases     : > 1,000 PPM; up to 3,000 PPM
+                  (firmware: MQ135_MIN_PPM=400, MQ135_MAX_PPM=3000)
+  - MQ-4      : CH4 (methane) sensor
+                  Atmospheric CH4 ≈ 2 PPM — BELOW MQ-4 detection range
+                  Sensor floor in clean air: ~326 PPM (hardware confirmed)
+                  Fermentation onset: rises well above 1,000 PPM
+                  (firmware: MQ4_MIN_PPM=300, MQ4_MAX_PPM=10000)
+  - ESP32-CAM : irradiance (W/m²) — optional, defaults to 0.0
+  - SW-420    : vibration (bool → 0.0/1.0)
 
-NO CO2 sensor. NO ethylene sensor.
+NO CO2 sensor. NO ethylene sensor. NO MQ-6 sensor.
 """
 
 import os
@@ -91,7 +102,7 @@ def _compute_features(
     humidity: list[float],
     nh3: list[float],
     ch4: list[float],
-    light: list[float],
+    light: list[float] | None,
     vibration: list[float],
     time_since_loading_days: float,
     initial_load: float = 250.0,
@@ -103,7 +114,14 @@ def _compute_features(
     rh_arr    = np.array(humidity, dtype=float)
     nh3_arr   = np.array(nh3, dtype=float)
     ch4_arr   = np.array(ch4, dtype=float)
-    light_arr = np.array(light, dtype=float)
+
+    # light is OPTIONAL — the camera node pushes frames independently.
+    # Default to [0.0] when absent so the feature is always present
+    # (0 W/m² = no irradiance detected, no light-stress penalty applied).
+    if not light:
+        light_arr = np.array([0.0], dtype=float)
+    else:
+        light_arr = np.array(light, dtype=float)
 
     temp_mean = float(np.mean(temp_arr))
     temp_var  = float(np.var(temp_arr))
@@ -146,10 +164,10 @@ def _compute_features(
 def _heuristic_shelf_life(features: dict) -> dict:
     temp         = features["temp_mean"]
     rh           = features["rh_mean"]
-    nh3          = features["nh3_mean"]      # ppm from MQ-135
-    ch4          = features["ch4_mean"]      # ppm from MQ-4
+    nh3          = features["nh3_mean"]     # ppm from MQ-135 (baseline ~400 ppm clean air)
+    ch4          = features["ch4_mean"]     # ppm from MQ-4  (sensor floor ~326 ppm clean air)
     days         = features["time_since_loading_days"]
-    irr          = features["irradiance_mean"]  # W/m² from camera
+    irr          = features["irradiance_mean"]  # W/m² from camera (0 if no frame)
 
     max_days = 180.0  # Baseline 6 months for well-stored onions
 
@@ -167,19 +185,28 @@ def _heuristic_shelf_life(features: dict) -> dict:
     elif rh < 55:
         max_days -= (55 - rh) * 2
 
-    # NH3 penalty (MQ-135): fresh onions ≈ 5–20 ppm; >100 ppm = spoilage signal
-    if nh3 > 100:
-        max_days -= (nh3 - 100) * 0.2
-    elif nh3 > 30:
-        max_days -= (nh3 - 30) * 0.05
+    # NH3 penalty (MQ-135):
+    #   Baseline in clean storage air: ~400 PPM (sensor floor).
+    #   400–800 PPM  = normal storage air, no penalty
+    #   800–1,500 PPM = elevated, mild spoilage signal
+    #   > 1,500 PPM  = heavy ammonia buildup, active spoilage
+    if nh3 > 1500:
+        max_days -= (nh3 - 1500) * 0.04
+    elif nh3 > 800:
+        max_days -= (nh3 - 800) * 0.01
 
-    # CH4 penalty (MQ-4): baseline 300–800 ppm; >2000 ppm = fermentation
+    # CH4 penalty (MQ-4):
+    #   Sensor floor in clean air: ~326 PPM (not atmospheric; MQ-4 can’t read 2 PPM).
+    #   330–1,000 PPM  = normal / sensor baseline range, no penalty
+    #   1,000–2,000 PPM = fermentation starting
+    #   > 2,000 PPM     = active anaerobic fermentation
     if ch4 > 2000:
         max_days -= (ch4 - 2000) * 0.005
     elif ch4 > 1000:
         max_days -= (ch4 - 1000) * 0.002
 
     # Irradiance penalty (light stress causes sprouting)
+    # 0 W/m² = no camera frame or dark storage — no penalty applied
     if irr > 50:
         max_days -= (irr - 50) * 0.05
 
